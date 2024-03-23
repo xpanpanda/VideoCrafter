@@ -7,9 +7,10 @@ import torch.distributed as dist
 
 def gather_data(data, return_np=True):
     ''' gather data from multiple processes to one list '''
-    data_list = [torch.zeros_like(data) for _ in range(dist.get_world_size())]
+    '''将分布式进程中的数据都聚集到一个张量中'''
+    data_list = [torch.zeros_like(data) for _ in range(dist.get_world_size())] #先创建一个(num_processes,(data))的张量
     dist.all_gather(data_list, data)  # gather not supported with NCCL
-    if return_np:
+    if return_np: # 如果要返回np形式
         data_list = [data.cpu().numpy() for data in data_list]
     return data_list
 
@@ -23,12 +24,15 @@ def autocast(f):
 
 
 def extract_into_tensor(a, t, x_shape):
+    '''a输入张量，t索引张量，x_shape输出张量的形状'''
+    # 除了t的最后一维，张量t的前面维度与a的对应前面维度相同
     b, *_ = t.shape
-    out = a.gather(-1, t)
+    out = a.gather(-1, t) #在输入张量的最后一个维度按照索引张量t进行提取
     return out.reshape(b, *((1,) * (len(x_shape) - 1)))
 
 
 def noise_like(shape, device, repeat=False):
+                                                                    #第一个维度重复次数 #后面维度重复次数都是1，即除了第一个维度后面都不重复
     repeat_noise = lambda: torch.randn((1, *shape[1:]), device=device).repeat(shape[0], *((1,) * (len(shape) - 1)))
     noise = lambda: torch.randn(shape, device=device)
     return repeat_noise() if repeat else noise()
