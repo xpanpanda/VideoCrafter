@@ -52,7 +52,10 @@ def get_obj_from_str(string, reload=False):
 
 
 def load_npz_from_dir(data_dir):
+    # data (num_data_name, data.shape[0],data.shape[1], ..., data.shape[n])
+    # 从 NumPy 文件加载键名为 'arr_0' 的数组, 假如没有键名，这个值为默认值
     data = [np.load(os.path.join(data_dir, data_name))['arr_0'] for data_name in os.listdir(data_dir)]
+    # data (num_data_name*data.shape[0], data.shape[1], ..., data.shape[n])
     data = np.concatenate(data, axis=0)
     return data
 
@@ -66,12 +69,15 @@ def load_npz_from_paths(data_paths):
 def resize_numpy_image(image, max_resolution=512 * 512, resize_short_edge=None):
     h, w = image.shape[:2]
     if resize_short_edge is not None:
+        # 使得较短边变成resize_short_edge,宽和高比例如前
         k = resize_short_edge / min(h, w)
     else:
+        # 归一化图像使得新的图片的面积为max_resolution
         k = max_resolution / (h * w)
         k = k**0.5
     h = int(np.round(h * k / 64)) * 64
     w = int(np.round(w * k / 64)) * 64
+    # 插值使得保有良好的性质
     image = cv2.resize(image, (w, h), interpolation=cv2.INTER_LANCZOS4)
     return image
 
