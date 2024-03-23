@@ -24,8 +24,11 @@ class RelativePosition(nn.Module):
 
     def __init__(self, num_units, max_relative_position):
         super().__init__()
+        # embedding的维度大小
         self.num_units = num_units
+        # 最大相对距离
         self.max_relative_position = max_relative_position
+        # 相当于相对位置编码的标准
         self.embeddings_table = nn.Parameter(torch.Tensor(max_relative_position * 2 + 1, num_units))
         nn.init.xavier_uniform_(self.embeddings_table)
 
@@ -41,7 +44,9 @@ class RelativePosition(nn.Module):
         distance_mat_clipped = torch.clamp(distance_mat, -self.max_relative_position, self.max_relative_position)
         final_mat = distance_mat_clipped + self.max_relative_position
         final_mat = final_mat.long()
+        # final_mat的形状，每个位置根据distance给出embeddings_table的对应编码
         embeddings = self.embeddings_table[final_mat]
+        # 形状(length_k, length_q, embedding_dim)
         return embeddings
 
 
@@ -65,20 +70,31 @@ class CrossAttention(nn.Module):
         self.text_context_len = 77
         self.img_cross_attention = img_cross_attention
         if self.img_cross_attention:
+            # 虽然训练形式一致，但是训练时需要参数不同，故关于img的cross-attention均进行了单独分离
             self.to_k_ip = nn.Linear(context_dim, inner_dim, bias=False)
             self.to_v_ip = nn.Linear(context_dim, inner_dim, bias=False)
         
         self.relative_position = relative_position
         if self.relative_position:
             assert(temporal_length is not None)
+            # 时间层面的相对位置
             self.relative_position_k = RelativePosition(num_units=dim_head, max_relative_position=temporal_length)
             self.relative_position_v = RelativePosition(num_units=dim_head, max_relative_position=temporal_length)
         else:
             ## only used for spatial attention, while NOT for temporal attention
+            # 只用于空间的cross-attention，不用于时间的cross-attention
             if XFORMERS_IS_AVAILBLE and temporal_length is None:
                 self.forward = self.efficient_forward
 
     def forward(self, x, context=None, mask=None):
+        '''
+        Q=W^q.I
+        K=W^k.I
+        V=W^v.I
+        A=K^T.Q
+        A->softmax->normalize->A'
+        O=V.A'
+        '''
         h = self.heads
 
         q = self.to_q(x)
@@ -93,11 +109,17 @@ class CrossAttention(nn.Module):
         else:
             k = self.to_k(context)
             v = self.to_v(context)
-
+        
+        ## 实现q.k，先在原有k上做点乘，再将k的位置编码做点乘，两者之和    
+        # b:num_batchs n:length_seq h:num_heads d:num_dimensions_per_head=dim_heads
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+        # dot-product：类似与矩阵运算的感觉 (i,d)dot(d,j)=(i,j)，说明是在维度层面进行点乘
+        # scale控制大小防止梯度消失或者爆炸
         sim = torch.einsum('b i d, b j d -> b i j', q, k) * self.scale
         if self.relative_position:
             len_q, len_k, len_v = q.shape[1], k.shape[1], v.shape[1]
+            # q (bh,q,d)
+            # k2 (q,k,d)
             k2 = self.relative_position_k(len_q, len_k)
             sim2 = einsum('b t d, t s d -> b t s', q, k2) * self.scale # TODO check 
             sim += sim2
@@ -105,10 +127,15 @@ class CrossAttention(nn.Module):
 
         if exists(mask):
             ## feasible for causal attention mask only
+            # 计算sim张量数据类型能表示的最大负值。这是因为我们想要将不可行的位置的注意力分数设置为一个非常小的值，
+            # 从而在应用softmax函数时，这些位置的权重接近于零。
             max_neg_value = -torch.finfo(sim.dtype).max
+            # 沿注意力头进行repeat，确保每个head都有mask
             mask = repeat(mask, 'b i j -> (b h) i j', h=h)
+            # ~按位取反，将mask<=0.5的数值都变成最大负值
             sim.masked_fill_(~(mask>0.5), max_neg_value)
-
+            
+        
         # attention, what we cannot get enough of
         sim = sim.softmax(dim=-1)
         out = torch.einsum('b i j, b j d -> b i d', sim, v)
