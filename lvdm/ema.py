@@ -63,6 +63,7 @@ class LitEma(nn.Module):
           parameters: Iterable of `torch.nn.Parameter`; the parameters to be
             temporarily stored.
         """
+        # 临时存储当前模型参数
         self.collected_params = [param.clone() for param in parameters]
 
     def restore(self, parameters):
@@ -77,4 +78,5 @@ class LitEma(nn.Module):
             updated with the stored parameters.
         """
         for c_param, param in zip(self.collected_params, parameters):
+            # 恢复初始的参数数据
             param.data.copy_(c_param.data)
