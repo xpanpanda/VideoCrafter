@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 
-
+# 基类：定义了两个方法
 class AbstractDistribution:
     def sample(self):
         raise NotImplementedError()
@@ -9,7 +9,7 @@ class AbstractDistribution:
     def mode(self):
         raise NotImplementedError()
 
-
+# 单点分布
 class DiracDistribution(AbstractDistribution):
     def __init__(self, value):
         self.value = value
@@ -20,15 +20,21 @@ class DiracDistribution(AbstractDistribution):
     def mode(self):
         return self.value
 
-
+# 对角高斯分布
 class DiagonalGaussianDistribution(object):
     def __init__(self, parameters, deterministic=False):
+        # parameters存储均值和方差
         self.parameters = parameters
+        # 在第二个维度将该张量对半分，一个存均值一个存放差
         self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
+        # 将对数方差限制在(-30，20）的范围
         self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
         self.deterministic = deterministic
+        # 计算标准差
         self.std = torch.exp(0.5 * self.logvar)
+        # 计算方差
         self.var = torch.exp(self.logvar)
+        # 确定采样->方差和标准差都为0
         if self.deterministic:
             self.var = self.std = torch.zeros_like(self.mean).to(device=self.parameters.device)
 
@@ -38,11 +44,12 @@ class DiagonalGaussianDistribution(object):
         
         x = self.mean + self.std * noise.to(device=self.parameters.device)
         return x
-
+    # 计算KL散度
     def kl(self, other=None):
         if self.deterministic:
             return torch.Tensor([0.])
         else:
+            # other是另一个高斯分布
             if other is None:
                 return 0.5 * torch.sum(torch.pow(self.mean, 2)
                                        + self.var - 1.0 - self.logvar,
@@ -53,6 +60,7 @@ class DiagonalGaussianDistribution(object):
                     + self.var / other.var - 1.0 - self.logvar + other.logvar,
                     dim=[1, 2, 3])
 
+    # 负最大似然函数
     def nll(self, sample, dims=[1,2,3]):
         if self.deterministic:
             return torch.Tensor([0.])
