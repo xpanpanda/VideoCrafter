@@ -108,6 +108,7 @@ class HybridConditioner(nn.Module):
         self.crossattn_conditioner = instantiate_from_config(c_crossattn_config)
 
     def forward(self, c_concat, c_crossattn):
+        # 某种类的实例
         c_concat = self.concat_conditioner(c_concat)
         c_crossattn = self.crossattn_conditioner(c_crossattn)
         return {'c_concat': [c_concat], 'c_crossattn': [c_crossattn]}
