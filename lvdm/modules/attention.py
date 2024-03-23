@@ -85,7 +85,7 @@ class CrossAttention(nn.Module):
             # 只用于空间的cross-attention，不用于时间的cross-attention
             if XFORMERS_IS_AVAILBLE and temporal_length is None:
                 self.forward = self.efficient_forward
-
+    ### forward方法适用于需要处理文本和图像输入，并且需要考虑**相对位置信息**的场景
     def forward(self, x, context=None, mask=None):
         '''
         Q=W^q.I
@@ -135,7 +135,7 @@ class CrossAttention(nn.Module):
             # ~按位取反，将mask<=0.5的数值都变成最大负值
             sim.masked_fill_(~(mask>0.5), max_neg_value)
             
-        
+        ## 同理于上的策略
         # attention, what we cannot get enough of
         sim = sim.softmax(dim=-1)
         out = torch.einsum('b i j, b j d -> b i d', sim, v)
@@ -146,6 +146,7 @@ class CrossAttention(nn.Module):
         out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
 
         ## considering image token additionally
+        ## 图像输入的cross_attention
         if context is not None and self.img_cross_attention:
             k_ip, v_ip = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (k_ip, v_ip))
             sim_ip =  torch.einsum('b i d, b j d -> b i j', q, k_ip) * self.scale
@@ -157,7 +158,8 @@ class CrossAttention(nn.Module):
         del q
 
         return self.to_out(out)
-    
+
+    ### 更适用于需要优化内存使用，特别是在处理大型序列或在资源受限的环境中的场景
     def efficient_forward(self, x, context=None, mask=None):
         q = self.to_q(x)
         context = default(context, x)
@@ -223,9 +225,11 @@ class BasicTransformerBlock(nn.Module):
         super().__init__()
         attn_cls = CrossAttention if attention_cls is None else attention_cls
         self.disable_self_attn = disable_self_attn
+        # 使用上下文维度
         self.attn1 = attn_cls(query_dim=dim, heads=n_heads, dim_head=d_head, dropout=dropout,
             context_dim=context_dim if self.disable_self_attn else None)
         self.ff = FeedForward(dim, dropout=dropout, glu=gated_ff)
+        # 使用图像的注意力层
         self.attn2 = attn_cls(query_dim=dim, context_dim=context_dim, heads=n_heads, dim_head=d_head, dropout=dropout,
             img_cross_attention=img_cross_attention)
         self.norm1 = nn.LayerNorm(dim)
@@ -285,6 +289,7 @@ class SpatialTransformer(nn.Module):
                 checkpoint=use_checkpoint) for d in range(depth)
         ])
         if not use_linear:
+            # zero_module是一个自定义的辅助函数，用于将模块的权重初始化为零。这有助于在特定情况下避免梯度流动到输出层，或者在模型初始化阶段减少参数的数量。
             self.proj_out = zero_module(nn.Conv2d(inner_dim, in_channels, kernel_size=1, stride=1, padding=0))
         else:
             self.proj_out = zero_module(nn.Linear(inner_dim, in_channels))
@@ -297,7 +302,7 @@ class SpatialTransformer(nn.Module):
         x = self.norm(x)
         if not self.use_linear:
             x = self.proj_in(x)
-        x = rearrange(x, 'b c h w -> b (h w) c').contiguous()
+        x = rearrange(x, 'b c h w -> b (h w) c').contiguous() #在MLP中的形状要求(num_batchs, num_features, in_channels)
         if self.use_linear:
             x = self.proj_in(x)
         for i, block in enumerate(self.transformer_blocks):
@@ -335,11 +340,15 @@ class TemporalTransformer(nn.Module):
 
         if relative_position:
             assert(temporal_length is not None)
+            # partial的目的是为了在创建类实例时固定某些参数的值。这在配置具有多个参数的类时非常有用，尤其是当你想要在多个地方重用相同的参数设置时。
+            # 就是固定了CrossAttention的relative_position, temporal_length参数，使得之后可以用attention_cls代替CrossAttention构造实例
             attention_cls = partial(CrossAttention, relative_position=True, temporal_length=temporal_length)
         else:
             attention_cls = None
+        # causal_attention因果注意力，只考虑前面的信息，几乎不考虑未来信息
         if self.causal_attention:
             assert(temporal_length is not None)
+            # torch.tril只关注下三角部分
             self.mask = torch.tril(torch.ones([1, temporal_length, temporal_length]))
 
         if self.only_self_att:
@@ -361,12 +370,16 @@ class TemporalTransformer(nn.Module):
         self.use_linear = use_linear
 
     def forward(self, x, context=None):
+        # b:batch_size c:num_channels t: num_steps h:height w:width
         b, c, t, h, w = x.shape
         x_in = x
         x = self.norm(x)
+        # 扩展图像的每个像素点为独立的序列元素，并沿着时间维度进行迭代，可以使模型能够更好地捕捉到时间序列数据中的模式和依赖关系。
         x = rearrange(x, 'b c t h w -> (b h w) c t').contiguous()
+        # channel放前面使用卷积层
         if not self.use_linear:
             x = self.proj_in(x)
+        # channel放后面使用线性层
         x = rearrange(x, 'bhw c t -> bhw t c').contiguous()
         if self.use_linear:
             x = self.proj_in(x)
@@ -381,9 +394,11 @@ class TemporalTransformer(nn.Module):
             ## note: if no context is given, cross-attention defaults to self-attention
             for i, block in enumerate(self.transformer_blocks):
                 x = block(x, mask=mask)
+            #(bhw,t,c)->(b,hw,t,c)
             x = rearrange(x, '(b hw) t c -> b hw t c', b=b).contiguous()
         else:
             x = rearrange(x, '(b hw) t c -> b hw t c', b=b).contiguous()
+            # l可能序列长度，con为特征数
             context = rearrange(context, '(b t) l con -> b t l con', t=t).contiguous()
             for i, block in enumerate(self.transformer_blocks):
                 # calculate each batch one by one (since number in shape could not greater then 65,535 for some package)
@@ -412,9 +427,9 @@ class GEGLU(nn.Module):
 
     def forward(self, x):
         x, gate = self.proj(x).chunk(2, dim=-1)
-        return x * F.gelu(gate)
+        return x * F.gelu(gate) #输出是输入x与门控信号gate的逐元素乘积的结果。
 
-
+# FFN：(b,n,d)->(bn,d)->2*FCN->(b,n,d)
 class FeedForward(nn.Module):
     def __init__(self, dim, dim_out=None, mult=4, glu=False, dropout=0.):
         super().__init__()
