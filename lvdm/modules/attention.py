@@ -18,6 +18,7 @@ from lvdm.basics import (
     zero_module,
 )
 
+# 相对位置
 class RelativePosition(nn.Module):
     """ https://github.com/evelinehong/Transformer_Relative_Position_PyTorch/blob/master/relative_position.py """
 
@@ -30,9 +31,13 @@ class RelativePosition(nn.Module):
 
     def forward(self, length_q, length_k):
         device = self.embeddings_table.device
+        # query长度
         range_vec_q = torch.arange(length_q, device=device)
+        # key长度
         range_vec_k = torch.arange(length_k, device=device)
+        # 使用广播机制 range_vec_k[None, :] (1,length_q) range_vec_q[:, None] (length_k,1)
         distance_mat = range_vec_k[None, :] - range_vec_q[:, None]
+        # 将distance_mat中的元素限定在[-self.max_relative_position, self.max_relative_position]
         distance_mat_clipped = torch.clamp(distance_mat, -self.max_relative_position, self.max_relative_position)
         final_mat = distance_mat_clipped + self.max_relative_position
         final_mat = final_mat.long()
