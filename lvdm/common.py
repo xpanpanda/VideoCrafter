@@ -56,6 +56,7 @@ def mean_flat(tensor):
     """
     Take the mean over all non-batch dimensions.
     """
+    #                           计算除了第一维度的平均值
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
 def ismap(x):
@@ -66,6 +67,7 @@ def ismap(x):
 def isimage(x):
     if not isinstance(x,torch.Tensor):
         return False
+    # (num_batchs,h,w,c)//(num_batchs,c,h,w)
     return (len(x.shape) == 4) and (x.shape[1] == 3 or x.shape[1] == 1)
 
 def max_neg_value(t):
@@ -92,6 +94,8 @@ def checkpoint(func, inputs, params, flag):
                    explicitly take as arguments.
     :param flag: if False, disable gradient checkpointing.
     """
+    '''接受四个参数：func（要评估的函数）、inputs（传递给func的参数序列）、
+    params（func依赖但不显式作为参数接受的参数序列）和flag（如果为False，禁用梯度检查点）'''
     if flag:
         return ckpt(func, *inputs)
     else:
