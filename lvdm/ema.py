@@ -9,10 +9,11 @@ class LitEma(nn.Module):
             raise ValueError('Decay must be between 0 and 1')
 
         self.m_name2s_name = {}
-        self.register_buffer('decay', torch.tensor(decay, dtype=torch.float32))
+        # 将参数移动到缓冲区
+        self.register_buffer('decay', torch.tensor(decay, dtype=torch.float32)) #标量的张量，但是可以使用广播机制
         self.register_buffer('num_updates', torch.tensor(0,dtype=torch.int) if use_num_upates
                              else torch.tensor(-1,dtype=torch.int))
-
+        
         for name, p in model.named_parameters():
             if p.requires_grad:
                 #remove as '.'-character is not allowed in buffers
@@ -26,7 +27,9 @@ class LitEma(nn.Module):
         decay = self.decay
 
         if self.num_updates >= 0:
+            # 计数，知道当下是第几次update 便于更新权重衰减参数
             self.num_updates += 1
+            # 更新权重衰减参数
             decay = min(self.decay,(1 + self.num_updates) / (10 + self.num_updates))
 
         one_minus_decay = 1.0 - decay
@@ -39,6 +42,7 @@ class LitEma(nn.Module):
                 if m_param[key].requires_grad:
                     sname = self.m_name2s_name[key]
                     shadow_params[sname] = shadow_params[sname].type_as(m_param[key])
+                    # 原地更新EMA_t参数,无需将不同t的EMA存在一起，只需要在同一块内存一直更新即可
                     shadow_params[sname].sub_(one_minus_decay * (shadow_params[sname] - m_param[key]))
                 else:
                     assert not key in self.m_name2s_name
