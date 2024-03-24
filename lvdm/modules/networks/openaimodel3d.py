@@ -47,7 +47,7 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
                 x = layer(x,)
         return x
 
-
+# 下采样：卷积＋池化
 class Downsample(nn.Module):
     """
     A downsampling layer with an optional convolution.
@@ -76,7 +76,7 @@ class Downsample(nn.Module):
         assert x.shape[1] == self.channels
         return self.op(x)
 
-
+# 上采样：插值
 class Upsample(nn.Module):
     """
     An upsampling layer with an optional convolution.
@@ -174,9 +174,12 @@ class ResBlock(TimestepBlock):
             normalization(self.out_channels),
             nn.SiLU(),
             nn.Dropout(p=dropout),
+            # 通过将卷积层的权重初始化为零，并在前向传播时不进行任何权重更新，
+            # 这个卷积层实际上不会对通过它的数据做任何变换，即它将输入数据直接传递到下一层。
             zero_module(nn.Conv2d(self.out_channels, self.out_channels, 3, padding=1)),
         )
 
+        # 跳跃连接：它允许网络中的某一层的输出直接连接到后面层的输入，绕过中间的一些层。
         if self.out_channels == channels:
             self.skip_connection = nn.Identity()
         elif use_conv:
@@ -206,6 +209,7 @@ class ResBlock(TimestepBlock):
         return checkpoint(self._forward, input_tuple, self.parameters(), self.use_checkpoint)
 
     def _forward(self, x, emb,  batch_size=None,):
+        # 可以在输入的layer最后加入上下采样
         if self.updown:
             in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
             h = in_rest(x)
@@ -217,6 +221,7 @@ class ResBlock(TimestepBlock):
         emb_out = self.emb_layers(emb).type(h.dtype)
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
+        # 是否使用scaleshift机制
         if self.use_scale_shift_norm:
             out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
             scale, shift = torch.chunk(emb_out, 2, dim=1)
@@ -364,6 +369,7 @@ class UNetModel(nn.Module):
             nn.SiLU(),
             linear(time_embed_dim, time_embed_dim),
         )
+        # 生成与帧率fps相关的嵌入向量
         if self.fps_cond:
             self.fps_embedding = nn.Sequential(
                 linear(model_channels, time_embed_dim),
@@ -373,7 +379,7 @@ class UNetModel(nn.Module):
 
         self.input_blocks = nn.ModuleList(
             [
-                TimestepEmbedSequential(conv_nd(dims, in_channels, model_channels, 3, padding=1))
+                TimestepEmbedSequential(conv_nd(dims, in_channels, model_channels, 3, padding=1)) # 根据每一层layer种类不同，进行一系列的改写
             ]
         )
         if self.addition_attention:
@@ -387,10 +393,11 @@ class UNetModel(nn.Module):
                     use_checkpoint=use_checkpoint, only_self_att=temporal_selfatt_only, 
                     causal_attention=use_causal_attention, relative_position=use_relative_position, 
                     temporal_length=temporal_length))
-            
-        input_block_chans = [model_channels]
-        ch = model_channels
-        ds = 1
+        
+        # 构建下采样encoder    
+        input_block_chans = [model_channels] #存储每个下采样层的输出通道数列表
+        ch = model_channels #当前层的通道数
+        ds = 1 #当前的下采样率
         for level, mult in enumerate(channel_mult):
             for _ in range(num_res_blocks):
                 layers = [
@@ -401,12 +408,17 @@ class UNetModel(nn.Module):
                     )
                 ]
                 ch = mult * model_channels
+                # 假如此时的分辨率在attention的列表中
                 if ds in attention_resolutions:
+                    # 如果每个注意力头的固定通道数没有给定
                     if num_head_channels == -1:
+                        # 将总通道数均匀分配到每一个注意力头上
                         dim_head = ch // num_heads
-                    else:
+                    else:# 否则
+                        # 更新注意力头的个数以匹配每个注意力头的通道数
                         num_heads = ch // num_head_channels
                         dim_head = num_head_channels
+                    # 无条件加入ST
                     layers.append(
                         SpatialTransformer(ch, num_heads, dim_head, 
                             depth=transformer_depth, context_dim=context_dim, use_linear=use_linear,
@@ -414,6 +426,7 @@ class UNetModel(nn.Module):
                             img_cross_attention=self.use_image_attention
                         )
                     )
+                    # 如果有TT，则加入
                     if self.temporal_attention:
                         layers.append(
                             TemporalTransformer(ch, num_heads, dim_head,
@@ -423,8 +436,10 @@ class UNetModel(nn.Module):
                                 temporal_length=temporal_length
                             )
                         )
+                # 使用TimestepEmbedSequential(*layers)将根据layer种类不同进行对输入输出的一些变换
                 self.input_blocks.append(TimestepEmbedSequential(*layers))
-                input_block_chans.append(ch)
+                input_block_chans.append(ch) # 此时的通道数，存储起来为了上采样的时候可以pop（？）
+            非最后一次下采样的时候是RES-TT+ST-RES
             if level != len(channel_mult) - 1:
                 out_ch = ch
                 self.input_blocks.append(
@@ -440,8 +455,9 @@ class UNetModel(nn.Module):
                 )
                 ch = out_ch
                 input_block_chans.append(ch)
-                ds *= 2
-
+                ds *= 2 #分辨率*2,这里才完成一次下采样
+                
+        ## mid
         if num_head_channels == -1:
             dim_head = ch // num_heads
         else:
@@ -477,9 +493,11 @@ class UNetModel(nn.Module):
         )
         self.middle_block = TimestepEmbedSequential(*layers)
 
+        ## 构造上采样decoder
         self.output_blocks = nn.ModuleList([])
         for level, mult in list(enumerate(channel_mult))[::-1]:
             for i in range(num_res_blocks + 1):
+                # 复制出来的
                 ich = input_block_chans.pop()
                 layers = [
                     ResBlock(ch + ich, time_embed_dim, dropout,
@@ -536,7 +554,7 @@ class UNetModel(nn.Module):
         emb = self.time_embed(t_emb)
 
         if self.fps_cond:
-            if type(fps) == int:
+            if type(fps) == int: # 如果是个整数，则代表是个常数
                 fps = torch.full_like(timesteps, fps)
             fps_emb = timestep_embedding(fps,self.model_channels, repeat_only=False)
             emb += self.fps_embedding(fps_emb)
@@ -550,7 +568,9 @@ class UNetModel(nn.Module):
         x = rearrange(x, 'b c t h w -> (b t) c h w')
 
         h = x.type(self.dtype)
+        # 跟踪适配器特征的索引
         adapter_idx = 0
+        # 存储每个下采样层输出特征
         hs = []
         for id, module in enumerate(self.input_blocks):
             h = module(h, emb, context=context, batch_size=b)
@@ -558,6 +578,7 @@ class UNetModel(nn.Module):
                 h = self.init_attn(h, emb, context=context, batch_size=b)
             ## plug-in adapter features
             if ((id+1)%3 == 0) and features_adapter is not None:
+                # 将适配器特征与当前特征 h 相加。这允许模型在特定的层级集成额外的特征或信息
                 h = h + features_adapter[adapter_idx]
                 adapter_idx += 1
             hs.append(h)
