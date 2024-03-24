@@ -86,7 +86,8 @@ def make_attn(in_channels, attn_type="vanilla"):
         return nn.Identity(in_channels)
     else:
         return LinAttnBlock(in_channels)
- 
+
+#下采样模块
 class Downsample(nn.Module):
     def __init__(self, in_channels, with_conv):
         super().__init__()
@@ -101,6 +102,7 @@ class Downsample(nn.Module):
                                         padding=0)
     def forward(self, x):
         if self.with_conv:
+            # 表示各个维度上的填充维度
             pad = (0,1,0,1)
             x = torch.nn.functional.pad(x, pad, mode="constant", value=0)
             x = self.conv(x)
@@ -108,6 +110,7 @@ class Downsample(nn.Module):
             x = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2)
         return x
 
+#上采样模块
 class Upsample(nn.Module):
     def __init__(self, in_channels, with_conv):
         super().__init__()
@@ -126,6 +129,7 @@ class Upsample(nn.Module):
             x = self.conv(x)
         return x
 
+# 周期性嵌入
 def get_timestep_embedding(timesteps, embedding_dim):
     """
     This matches the implementation in Denoising Diffusion Probabilistic Models:
@@ -193,6 +197,7 @@ class ResnetBlock(nn.Module):
         h = nonlinearity(h)
         h = self.conv1(h)
 
+        # 时间步的嵌入
         if temb is not None:
             h = h + self.temb_proj(nonlinearity(temb))[:,:,None,None]
 
@@ -210,14 +215,15 @@ class ResnetBlock(nn.Module):
         return x+h
 
 class Model(nn.Module):
+    #U-net
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
                  resolution, use_timestep=True, use_linear_attn=False, attn_type="vanilla"):
         super().__init__()
         if use_linear_attn: attn_type = "linear"
-        self.ch = ch
+        self.ch = ch # 输入输出通道数
         self.temb_ch = self.ch*4
-        self.num_resolutions = len(ch_mult)
+        self.num_resolutions = len(ch_mult) # 不同分辨率数，ch_mult定义了不同分辨率层的通道数的乘数
         self.num_res_blocks = num_res_blocks
         self.resolution = resolution
         self.in_channels = in_channels
@@ -243,17 +249,20 @@ class Model(nn.Module):
         curr_res = resolution
         in_ch_mult = (1,)+tuple(ch_mult)
         self.down = nn.ModuleList()
+        # 不同分辨率
         for i_level in range(self.num_resolutions):
             block = nn.ModuleList()
             attn = nn.ModuleList()
             block_in = ch*in_ch_mult[i_level]
             block_out = ch*ch_mult[i_level]
+            # 不同block
             for i_block in range(self.num_res_blocks):
                 block.append(ResnetBlock(in_channels=block_in,
                                          out_channels=block_out,
                                          temb_channels=self.temb_ch,
                                          dropout=dropout))
                 block_in = block_out
+                # 分辨率到attention设定后，假如注意力层
                 if curr_res in attn_resolutions:
                     attn.append(make_attn(block_in, attn_type=attn_type))
             down = nn.Module()
@@ -325,6 +334,7 @@ class Model(nn.Module):
             temb = None
 
         # downsampling
+        # hs：copy用于upsampling的skip_in
         hs = [self.conv_in(x)]
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
@@ -691,7 +701,9 @@ class LatentRescaler(nn.Module):
         x = self.conv_in(x)
         for block in self.res_block1:
             x = block(x, None)
+        # 特征图通过插值缩放，self.factor作为系数
         x = torch.nn.functional.interpolate(x, size=(int(round(x.shape[2]*self.factor)), int(round(x.shape[3]*self.factor))))
+        # 缩放后的特征图经过attention
         x = self.attn(x)
         for block in self.res_block2:
             x = block(x, None)
