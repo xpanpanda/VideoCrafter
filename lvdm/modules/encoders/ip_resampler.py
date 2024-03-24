@@ -38,10 +38,10 @@ def reshape_tensor(x, heads):
     # (bs, length, n_heads, dim_per_head) --> (bs, n_heads, length, dim_per_head)
     x = x.transpose(1, 2)
     # (bs, n_heads, length, dim_per_head) --> (bs*n_heads, length, dim_per_head)
-    x = x.reshape(bs, heads, length, -1)
+    x = x.reshape(bs, heads, length, -1) #好奇怪你明明什么都没干
     return x
 
-
+# latent和x作为输入
 class PerceiverAttention(nn.Module):
     def __init__(self, *, dim, dim_head=64, heads=8):
         super().__init__()
@@ -72,9 +72,11 @@ class PerceiverAttention(nn.Module):
         b, l, _ = latents.shape
 
         q = self.to_q(latents)
-        kv_input = torch.cat((x, latents), dim=-2)
-        k, v = self.to_kv(kv_input).chunk(2, dim=-1)
-        
+        kv_input = torch.cat((x, latents), dim=-2) #(b,n1+n2,2D)
+        k, v = self.to_kv(kv_input).chunk(2, dim=-1) #k,v(b,n1+n2,D)
+
+        # 上述的D为inner_dim=dim_head*heads
+        # 下面三个的形状变化：(b,n,dim_head*heads)->(b,heads,n,dim_head)
         q = reshape_tensor(q, self.heads)
         k = reshape_tensor(k, self.heads)
         v = reshape_tensor(v, self.heads)
