@@ -34,7 +34,7 @@ class AbsolutePositionalEmbedding(nn.Module):
         n = torch.arange(x.shape[1], device=x.device)
         return self.emb(n)[None, :, :]
 
-
+# 位置编码 p[i,2j]=sin(i/10000^(2j/d)) p[i,2j+1]=cos(i/10000^(2j/d))
 class FixedPositionalEmbedding(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -94,6 +94,7 @@ def group_dict_by_key(cond, d):
     for key in d.keys():
         match = bool(cond(key))
         ind = int(not match)
+        # 满足条件存放在第一个数组中，不满足条件就放在第二个数组中
         return_val[ind][key] = d[key]
     return (*return_val,)
 
@@ -107,15 +108,19 @@ def group_by_key_prefix(prefix, d):
 
 
 def groupby_prefix_and_trim(prefix, d):
+    # 返回第一个数组，即满足cond条件的值
     kwargs_with_prefix, kwargs = group_dict_by_key(partial(string_begins_with, prefix), d)
+    # 表示第一个数组中去掉前缀的元素和第二个数组中的元素，他们的键值对形成元组
     kwargs_without_prefix = dict(map(lambda x: (x[0][len(prefix):], x[1]), tuple(kwargs_with_prefix.items())))
     return kwargs_without_prefix, kwargs
 
 
 # classes
+## 缩放操作
 class Scale(nn.Module):
     def __init__(self, value, fn):
         super().__init__()
+        #指定的scale
         self.value = value
         self.fn = fn
 
@@ -128,22 +133,26 @@ class Rezero(nn.Module):
     def __init__(self, fn):
         super().__init__()
         self.fn = fn
+        #可学习的scale
         self.g = nn.Parameter(torch.zeros(1))
 
     def forward(self, x, **kwargs):
         x, *rest = self.fn(x, **kwargs)
         return (x * self.g, *rest)
 
-
+## 标准化操作
 class ScaleNorm(nn.Module):
     def __init__(self, dim, eps=1e-5):
         super().__init__()
+        # 根据维度确定的scale
         self.scale = dim ** -0.5
         self.eps = eps
+        # 标量的可学习变量
         self.g = nn.Parameter(torch.ones(1))
 
     def forward(self, x):
         norm = torch.norm(x, dim=-1, keepdim=True) * self.scale
+        # 避免除数太小导致爆炸
         return x / norm.clamp(min=self.eps) * self.g
 
 
@@ -152,13 +161,14 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.scale = dim ** -0.5
         self.eps = eps
+        # 维度张量的可学习变量
         self.g = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
         norm = torch.norm(x, dim=-1, keepdim=True) * self.scale
         return x / norm.clamp(min=self.eps) * self.g
 
-
+## 残差链接
 class Residual(nn.Module):
     def forward(self, x, residual):
         return x + residual
@@ -241,13 +251,15 @@ class Attention(nn.Module):
         self.to_v = nn.Linear(dim, inner_dim, bias=False)
         self.dropout = nn.Dropout(dropout)
 
-        # talking heads
+        # talking heads 
+        # 在softmax前后引入其他的非线性层，调整注意力分数
         self.talking_heads = talking_heads
         if talking_heads:
             self.pre_softmax_proj = nn.Parameter(torch.randn(heads, heads))
             self.post_softmax_proj = nn.Parameter(torch.randn(heads, heads))
 
         # explicit topk sparse attention
+        # 稀疏的注意力，即只关注序列中的前k个最相关的键。
         self.sparse_topk = sparse_topk
 
         # entmax
@@ -255,12 +267,15 @@ class Attention(nn.Module):
         self.attn_fn = F.softmax
 
         # add memory key / values
+        # 记忆键值对允许模型在不同的注意力头之间共享信息，这有助于捕捉序列中的长期依赖关系。
+        # 注意力键值对的数量
         self.num_mem_kv = num_mem_kv
         if num_mem_kv > 0:
             self.mem_k = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
             self.mem_v = nn.Parameter(torch.randn(heads, num_mem_kv, dim_head))
 
         # attention on attention
+        # 注意力对注意力机制通过在注意力分数上应用额外的线性变换和非线性激活函数（如GLU），增加了模型的复杂性和表达能力
         self.attn_on_attn = on_attn
         self.to_out = nn.Sequential(nn.Linear(inner_dim, dim * 2), nn.GLU()) if on_attn else nn.Linear(inner_dim, dim)
 
@@ -282,10 +297,11 @@ class Attention(nn.Module):
         k_input = kv_input
         v_input = kv_input
 
+        # 记忆键值与实际键值张量拼接
         if exists(mem):
             k_input = torch.cat((mem, k_input), dim=-2)
             v_input = torch.cat((mem, v_input), dim=-2)
-
+        
         if exists(sinusoidal_emb):
             # in shortformer, the query would start at a position offset depending on the past cached memory
             offset = k_input.shape[-2] - q_input.shape[-2]
@@ -300,18 +316,23 @@ class Attention(nn.Module):
 
         input_mask = None
         if any(map(exists, (mask, context_mask))):
+            # 若有mask则用mask否则当做没有mask也就是mask张量全为1
             q_mask = default(mask, lambda: torch.ones((b, n), device=device).bool())
+            # 若有context_mask使用上下文掩膜，否则就使用跟q一样的掩膜
             k_mask = q_mask if not exists(context) else context_mask
             k_mask = default(k_mask, lambda: torch.ones((b, k.shape[-2]), device=device).bool())
-            q_mask = rearrange(q_mask, 'b i -> b () i ()')
-            k_mask = rearrange(k_mask, 'b j -> b () () j')
-            input_mask = q_mask * k_mask
+            # k_mask(b,n) q_mask(b,n)
+            q_mask = rearrange(q_mask, 'b i -> b () i ()') #(b,1,n,1)
+            k_mask = rearrange(k_mask, 'b j -> b () () j') #(b,1,1,n)
+            input_mask = q_mask * k_mask #(b,1,n,n)
 
         if self.num_mem_kv > 0:
-            mem_k, mem_v = map(lambda t: repeat(t, 'h n d -> b h n d', b=b), (self.mem_k, self.mem_v))
+            mem_k, mem_v = map(lambda t: repeat(t, 'h n d -> b h n d', b=b), (self.mem_k, self.mem_v)) #形状与k，v一致
             k = torch.cat((mem_k, k), dim=-2)
             v = torch.cat((mem_v, v), dim=-2)
             if exists(input_mask):
+                # 如果存在输入遮罩，使用F.pad函数在遮罩的最前面（维度-2的位置）添加self.num_mem_kv个值为True的遮罩位。
+                # 这样做是为了确保在计算注意力分数时，新添加的记忆键值对不会被掩盖
                 input_mask = F.pad(input_mask, (self.num_mem_kv, 0), value=True)
 
         dots = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
@@ -353,11 +374,14 @@ class Attention(nn.Module):
         attn = self.dropout(attn)
 
         if talking_heads:
+            # 与talking_heads做内积
             attn = einsum('b h i j, h k -> b k i j', attn, self.post_softmax_proj).contiguous()
 
+        #第二个talking_heads做内积
         out = einsum('b h i j, b h j d -> b h i d', attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
 
+        #通过创建 Intermediates 对象，你可以将这些中间变量作为一个整体传递给模型的其他部分，或者用于后续的分析和调试。
         intermediates = Intermediates(
             pre_softmax_attn=pre_softmax_attn,
             post_softmax_attn=post_softmax_attn
