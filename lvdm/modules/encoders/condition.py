@@ -20,7 +20,7 @@ class IdentityEncoder(AbstractEncoder):
     def encode(self, x):
         return x
 
-
+# 类别嵌入：随机将部分输入数据替换为标签是“unconditional class”
 class ClassEmbedder(nn.Module):
     def __init__(self, embed_dim, n_classes=1000, key='class', ucg_rate=0.1):
         super().__init__()
@@ -35,7 +35,8 @@ class ClassEmbedder(nn.Module):
         # this is for use in crossattn
         c = batch[key][:, None]
         if self.ucg_rate > 0. and not disable_dropout:
-            mask = 1. - torch.bernoulli(torch.ones_like(c) * self.ucg_rate)
+            mask = 1. - torch.bernoulli(torch.ones_like(c) * self.ucg_rate) #伯努利分布式0,1的二项分布，系数p=ucg_rate
+            # mask为1时，取的是c中元素，mask为0是，取得是unconditional class中元素
             c = mask * c + (1 - mask) * torch.ones_like(c) * (self.n_classes - 1)
             c = c.long()
         c = self.embedding(c)
@@ -60,6 +61,7 @@ class FrozenT5Embedder(AbstractEncoder):
     def __init__(self, version="google/t5-v1_1-large", device="cuda", max_length=77,
                  freeze=True):  # others are google/t5-v1_1-xl and google/t5-v1_1-xxl
         super().__init__()
+        # 使用T5架构与预训练模型
         self.tokenizer = T5Tokenizer.from_pretrained(version)
         self.transformer = T5EncoderModel.from_pretrained(version)
         self.device = device
@@ -68,15 +70,19 @@ class FrozenT5Embedder(AbstractEncoder):
             self.freeze()
 
     def freeze(self):
+        # 冻结参数
         self.transformer = self.transformer.eval()
         # self.train = disabled_train
         for param in self.parameters():
             param.requires_grad = False
 
     def forward(self, text):
+        # batch_encoding是一个字典
         batch_encoding = self.tokenizer(text, truncation=True, max_length=self.max_length, return_length=True,
                                         return_overflowing_tokens=False, padding="max_length", return_tensors="pt")
+        # input_ids是一个列表，每一个token对应一个id
         tokens = batch_encoding["input_ids"].to(self.device)
+        # 将input_ids移到device上后的tokens
         outputs = self.transformer(input_ids=tokens)
 
         z = outputs.last_hidden_state
@@ -146,7 +152,7 @@ class ClipImageEmbedder(nn.Module):
         from clip import load as load_clip
         self.model, _ = load_clip(name=model, device=device, jit=jit)
 
-        self.antialias = antialias
+        self.antialias = antialias # 是一个布尔值参数，用于指示是否应用抗锯齿质量改善。
 
         self.register_buffer('mean', torch.Tensor([0.48145466, 0.4578275, 0.40821073]), persistent=False)
         self.register_buffer('std', torch.Tensor([0.26862954, 0.26130258, 0.27577711]), persistent=False)
@@ -154,9 +160,10 @@ class ClipImageEmbedder(nn.Module):
 
     def preprocess(self, x):
         # normalize to [0,1]
+        # 将x标准化到0-1
         x = kornia.geometry.resize(x, (224, 224),
-                                   interpolation='bicubic', align_corners=True,
-                                   antialias=self.antialias)
+                                   interpolation='bicubic', align_corners=True, # 插值方法，是否保留角落
+                                   antialias=self.antialias) #抗锯齿替身图像质量
         x = (x + 1.) / 2.
         # re-normalize according to clip
         x = kornia.enhance.normalize(x, self.mean, self.std)
@@ -167,6 +174,7 @@ class ClipImageEmbedder(nn.Module):
         out = self.model.encode_image(self.preprocess(x))
         out = out.to(x.dtype)
         if self.ucg_rate > 0. and not no_dropout:
+            # 将out中部分元素随机变为0，相当于掩膜
             out = torch.bernoulli((1. - self.ucg_rate) * torch.ones(out.shape[0], device=out.device))[:, None] * out
         return out
 
@@ -213,7 +221,7 @@ class FrozenOpenCLIPEmbedder(AbstractEncoder):
         return z
 
     def encode_with_transformer(self, text):
-        x = self.model.token_embedding(text)  # [batch_size, n_ctx, d_model]
+        x = self.model.token_embedding(text)  # [batch_size, n_ctx, d_model]=(batch_size,max_text_length,embedding_dim)
         x = x + self.model.positional_embedding
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
@@ -223,13 +231,15 @@ class FrozenOpenCLIPEmbedder(AbstractEncoder):
 
     def text_transformer_forward(self, x: torch.Tensor, attn_mask=None):
         for i, r in enumerate(self.model.transformer.resblocks):
-            if i == len(self.model.transformer.resblocks) - self.layer_idx:
+            if i == len(self.model.transformer.resblocks) - self.layer_idx: 
+                #self.layer_idx 为0，表示提取最后一个残差块的输出，为1则表示提取倒数第二个残差块的输出，以此类推
+                #最后的一个block在函数外面的ln_final进行实现
                 break
             if self.model.transformer.grad_checkpointing and not torch.jit.is_scripting():
                 x = checkpoint(r, x, attn_mask)
             else:
                 x = r(x, attn_mask=attn_mask)
-        return x
+        return x #输出的是LND
 
     def encode(self, text):
         return self(text)
@@ -286,13 +296,12 @@ class FrozenOpenCLIPImageEmbedder(AbstractEncoder):
         return z
 
     def encode_with_vision_transformer(self, img):
-        img = self.preprocess(img)
-        x = self.model.visual(img)
+        img = self.preprocess(img) #对图像剪裁等预处理
+        x = self.model.visual(img) #对图像提取一定的特征信息，可能含有多个全连接、卷积层等
         return x
 
     def encode(self, text):
         return self(text)
-
 
 
 class FrozenOpenCLIPImageEmbedderV2(AbstractEncoder):
@@ -343,24 +352,32 @@ class FrozenOpenCLIPImageEmbedderV2(AbstractEncoder):
 
     def encode_with_vision_transformer(self, x):
         x = self.preprocess(x)
-
+        # x本身是(b,c,h,w)
         # to patches - whether to use dual patchnorm - https://arxiv.org/abs/2302.01327v1
-        if self.model.visual.input_patchnorm:
-            # einops - rearrange(x, 'b c (h p1) (w p2) -> b (h w) (c p1 p2)')
+        if self.model.visual.input_patchnorm: # 使用块归一化
+            # einops - rearrange(x, 'b c (h p1) (w p2) -> b (h w) (c p1 p2)') 这是以下三步的操作
+            # grid先划分网格，patch再划分patch
+            # 0表示高度维，1表示宽度维
             x = x.reshape(x.shape[0], x.shape[1], self.model.visual.grid_size[0], self.model.visual.patch_size[0], self.model.visual.grid_size[1], self.model.visual.patch_size[1])
             x = x.permute(0, 2, 4, 1, 3, 5)
             x = x.reshape(x.shape[0], self.model.visual.grid_size[0] * self.model.visual.grid_size[1], -1)
-            x = self.model.visual.patchnorm_pre_ln(x)
+
+            #接收输入(batch_size,num_patches,num_features)，便于在一个patch一个patch上做归一化
+            x = self.model.visual.patchnorm_pre_ln(x) 
+            # (batch_size,num_patches,k)
             x = self.model.visual.conv1(x)
         else:
+            # width在这里应该是卷积核的数量，后续记为k
             x = self.model.visual.conv1(x)  # shape = [*, width, grid, grid]
+            # grid*grid特征图展平为一维向量
             x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [*, width, grid ** 2]
+            # (batch_size,grid**2,k)
             x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
 
         # class embeddings and positional embeddings
         x = torch.cat(
             [self.model.visual.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device),
-             x], dim=1)  # shape = [*, grid ** 2 + 1, width]
+             x], dim=1)  # shape = [*, grid ** 2 + 1, width] 将<cls>在第1维度拼接起来
         x = x + self.model.visual.positional_embedding.to(x.dtype)
 
         # a patch_dropout of 0. would mean it is disabled and this function would do nothing but return what was passed in
