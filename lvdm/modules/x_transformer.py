@@ -443,7 +443,8 @@ class AttentionLayers(nn.Module):
 
         norm_fn = nn.Identity if use_rezero else norm_fn
         branch_fn = Rezero if use_rezero else None
-
+        
+        # 'a' 表示注意力层，'c' 表示交叉注意力层，'f' 表示前馈网络层
         if cross_attend and not only_cross:
             default_block = ('a', 'c', 'f')
         elif cross_attend and only_cross:
@@ -456,17 +457,36 @@ class AttentionLayers(nn.Module):
 
         if exists(custom_layers):
             layer_types = custom_layers
+        # 如果提供了 par_ratio 参数，则会根据这个比例来调整层的配置
         elif exists(par_ratio):
+            # 计算总层数
             par_depth = depth * len(default_block)
             assert 1 < par_ratio <= par_depth, 'par ratio out of range'
+            
+            # 过滤掉值为‘f’的block，因为要对FFN进行特殊处理
             default_block = tuple(filter(not_equals('f'), default_block))
+            
+            # par_ratio表明注意力子层的个数，par_attn表明每个注意力子层要处理的层数
             par_attn = par_depth // par_ratio
+            
+            # 只用2/3进行注意力，1/3进行FFN
             depth_cut = par_depth * 2 // 3  # 2 / 3 attention layer cutoff suggested by PAR paper
+            
+            # 确保所有注意力子层的总宽度为depth_cut + depth_cut // par_attn
             par_width = (depth_cut + depth_cut // par_attn) // par_attn
+            
             assert len(default_block) <= par_width, 'default block is too large for par_ratio'
+            
+            # par_block 是由默认块 (default_block) 和一定数量的前馈网络层 ('f') 组成的，以确保总宽度等于 par_width。
             par_block = default_block + ('f',) * (par_width - len(default_block))
+
+            # depth_cut + depth_cut // par_attn
             par_head = par_block * par_attn
+
             layer_types = par_head + ('f',) * (par_depth - len(par_head))
+
+        
+        # 如果提供了 sandwich_coef 参数，它将用于在默认块的前后添加一定数量的注意力层（'a'）
         elif exists(sandwich_coef):
             assert sandwich_coef > 0 and sandwich_coef <= depth, 'sandwich coefficient should be less than the depth'
             layer_types = ('a',) * sandwich_coef + default_block * (depth - sandwich_coef) + ('f',) * sandwich_coef
@@ -579,7 +599,7 @@ class TransformerWrapper(nn.Module):
             max_mem_len=0.,
             emb_dropout=0.,
             num_memory_tokens=None,
-            tie_embedding=False,
+            tie_embedding=False, #是否将嵌入层权重与输出层权重绑定
             use_pos_emb=True
     ):
         super().__init__()
@@ -592,17 +612,18 @@ class TransformerWrapper(nn.Module):
         self.max_mem_len = max_mem_len
         self.num_tokens = num_tokens
 
-        self.token_emb = nn.Embedding(num_tokens, emb_dim)
+        self.token_emb = nn.Embedding(num_tokens, emb_dim) 
         self.pos_emb = AbsolutePositionalEmbedding(emb_dim, max_seq_len) if (
                     use_pos_emb and not attn_layers.has_pos_emb) else always(0)
         self.emb_dropout = nn.Dropout(emb_dropout)
 
-        self.project_emb = nn.Linear(emb_dim, dim) if emb_dim != dim else nn.Identity()
+        self.project_emb = nn.Linear(emb_dim, dim) if emb_dim != dim else nn.Identity() # 将嵌入向量投影到注意力层的特征空间。仅在emb_dim不等于dim时使用
         self.attn_layers = attn_layers
         self.norm = nn.LayerNorm(dim)
 
         self.init_()
-
+        #tie_embedding为假时：使用线性全连接层
+        #tie_embedding为真时：使用矩阵乘法将注意力输出与嵌入层的权重矩阵的转置相乘
         self.to_logits = nn.Linear(dim, num_tokens) if not tie_embedding else lambda t: t @ self.token_emb.weight.t()
 
         # memory tokens (like [cls]) from Memory Transformers paper
