@@ -161,10 +161,10 @@ class DDIMSampler(object):
             iterator = time_range
 
         init_x0 = False
-        clean_cond = kwargs.pop("clean_cond", False)
+        clean_cond = kwargs.pop("clean_cond", False) # 是否使用干净的条件输入
         for i, step in enumerate(iterator):
-            index = total_steps - i - 1
-            ts = torch.full((b,), step, device=device, dtype=torch.long)
+            index = total_steps - i - 1 # 当前步长在总时间步长中的索引
+            ts = torch.full((b,), step, device=device, dtype=torch.long) # 创建一个形状为（b，），值为step的张量
             if start_timesteps is not None:
                 assert x0 is not None
                 if step > start_timesteps*time_range[0]:
